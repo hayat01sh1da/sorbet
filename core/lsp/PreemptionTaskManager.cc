@@ -49,15 +49,25 @@ PreemptionTask::RunResult PreemptionTaskManager::tryRunScheduledPreemptionTask(c
     TypecheckEpochManager::assertConsistentThread(
         typecheckingThreadId, "PreemptionTaskManager::tryRunScheduledPreemptionTask", "typechecking thread");
 
-    // We can early-exit if we know that it's not possible to run preemption yet, but if we know that rescheduling is
-    // not possible, we should run to completion.
-    if (allowReschedule && currentStratum < this->runnableAt.load()) {
+    // We exit early if there's no task present to ensure that the value of `runnableAt` is valid. The call to
+    // `trySchedulePreemptionTask` is what resets `runnableAt`, so if there's no task present it doesn't make sense to
+    // consult `runnableAt` to determine if we've reached the stratum that can support the task.
+    auto preemptTask = atomic_load(&this->preemptTask);
+    if (preemptTask == nullptr) {
         return result;
     }
 
-    auto preemptTask = atomic_load(&this->preemptTask);
-    if (preemptTask != nullptr &&
-        atomic_compare_exchange_strong(&this->preemptTask, &preemptTask, shared_ptr<PreemptionTask>(nullptr))) {
+    // We can early-exit if we know that it's not possible to run preemption yet, but if we know that rescheduling is
+    // not possible, we should run to completion.
+    if (allowReschedule) {
+        auto runnableStratum = this->runnableAt.load();
+        if (currentStratum < runnableStratum) {
+            result.setRescheduledStratum(runnableStratum);
+            return result;
+        }
+    }
+
+    if (atomic_compare_exchange_strong(&this->preemptTask, &preemptTask, shared_ptr<PreemptionTask>(nullptr))) {
         // Capture with write lock before running task. Ensures that all worker threads park before we proceed.
         absl::MutexLock lock(&typecheckMutex);
         // The error queue is where typechecking puts all typechecking errors. For a given edit, Sorbet LSP runs
